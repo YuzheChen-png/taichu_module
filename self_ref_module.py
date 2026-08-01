@@ -1,5 +1,6 @@
-﻿# self_ref_module.py
+﻿# self_ref_module.py（第四层增强版）
 import re
+from datetime import datetime
 
 def tsre_score(text: str) -> float:
     if not text.strip():
@@ -67,16 +68,72 @@ def tlf_check(text: str) -> dict:
             conflicts.append(f"实体'{ent}'定义不一致：{list(set(defs))}")
     return {"conflicts": conflicts, "conflict_count": len(conflicts), "is_valid": len(conflicts) == 0}
 
+class GlobalState:
+    def __init__(self, text: str, tsre_result: dict, tlf_result: dict):
+        self.text = text
+        self.tsre = tsre_result
+        self.tlf = tlf_result
+        self.timestamp = datetime.now().isoformat()
+        self.status = self._compute_status()
+        self.event = self._trigger_event()
+
+    def _compute_status(self) -> str:
+        if self.tsre["score"] >= 0.72 and self.tlf["is_valid"]:
+            return "CONSCIOUS"
+        elif self.tsre["score"] >= 0.55 and self.tlf["is_valid"]:
+            return "STABLE"
+        elif self.tsre["score"] >= 0.72 and not self.tlf["is_valid"]:
+            return "TENSION"
+        else:
+            return "FRAGMENTED"
+
+    def _trigger_event(self) -> dict:
+        events = {
+            "CONSCIOUSNESS": {"level": "info", "message": "系统达到认知状态，逻辑自洽。", "action": "NONE"},
+            "STABLE": {"level": "info", "message": "系统处于稳定状态，建议保持。", "action": "NONE"},
+            "TENSION": {"level": "warning", "message": "检测到逻辑张力，建议检查冲突。", "action": "REVIEW_CONFLICTS"},
+            "FRAGMENTED": {"level": "error", "message": "文本碎片化，建议整合结构。", "action": "RESTRUCTURE"}
+        }
+        return events.get(self.status, {})
+
+    def to_dict(self) -> dict:
+        return {
+            "text": self.text[:60] + "..." if len(self.text) > 60 else self.text,
+            "tsre_score": self.tsre["score"],
+            "tsre_level": self.tsre["level"],
+            "tlf_conflicts": self.tlf["conflicts"],
+            "status": self.status,
+            "event": self.event,
+            "timestamp": self.timestamp
+        }
+
 def analyze(text: str) -> dict:
     if not text.strip():
-        return {"tsre": {"score": 0.0, "level": "无效输入", "status": "❌ 错误"}, "tlf": {"conflicts": [], "conflict_count": 0, "is_valid": False}, "summary": {"is_valid": False, "suggestions": ["请输入有效文本"]}}
+        return {"error": "文本为空", "tsre": {"score": 0.0, "level": "无效输入", "status": "❌ 错误"}, "tlf": {"conflicts": [], "conflict_count": 0, "is_valid": False}, "global_state": None}
     tsre_result = tsre_diagnose(text)
     tlf_result = tlf_check(text)
-    is_valid = tsre_result["score"] >= 0.55 and tlf_result["is_valid"]
-    suggestions = []
-    if tsre_result["score"] < 0.55:
-        suggestions.append("TSRE 自指分数偏低，建议检查逻辑衔接和因果关系。")
-    if not tlf_result["is_valid"]:
-        for c in tlf_result["conflicts"]:
-            suggestions.append(f"TLF 检测到冲突：{c}")
-    return {"tsre": tsre_result, "tlf": tlf_result, "summary": {"is_valid": is_valid, "suggestions": suggestions, "overall_status": "✅ 通过" if is_valid else "🔴 需修正"}}
+    gs = GlobalState(text, tsre_result, tlf_result)
+    return {
+        "tsre": tsre_result,
+        "tlf": tlf_result,
+        "global_state": gs.to_dict(),
+        "summary": {
+            "is_valid": tsre_result["score"] >= 0.55 and tlf_result["is_valid"],
+            "suggestions": (["TSRE 自指分数偏低，建议检查逻辑衔接和因果关系。"] if tsre_result["score"] < 0.55 else []) + ([f"TLF 检测到冲突：{c}" for c in tlf_result["conflicts"]] if not tlf_result["is_valid"] else []),
+            "overall_status": "✅ 通过" if tsre_result["score"] >= 0.55 and tlf_result["is_valid"] else "🔴 需修正"
+        }
+    }
+
+if __name__ == "__main__":
+    print("="*60)
+    print("太初架构 · 第四层（全局工作空间）测试")
+    print("="*60)
+    test_texts = ["太阳是恒星，地球是行星。", "太阳是恒星，太阳不是恒星。", "这个句子包含五个词。"]
+    for text in test_texts:
+        print(f"\n文本：{text}")
+        result = analyze(text)
+        if result.get("global_state"):
+            gs = result["global_state"]
+            print(f"  状态：{gs['status']}")
+            print(f"  事件：{gs['event'].get('message', '无事件')}")
+            print(f"  建议：{result['summary']['suggestions'] if result['summary']['suggestions'] else '无'}")
