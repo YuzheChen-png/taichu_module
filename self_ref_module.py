@@ -1,6 +1,24 @@
-﻿# self_ref_module.py（含高亮功能）
+﻿# self_ref_module.py（功能深度增强版 v1.4）
 import re
 from datetime import datetime
+from collections import Counter
+
+# ---------- 辅助：句子分割 ----------
+def split_sentences(text: str) -> list:
+    """简单中文句子分割（按。！？；）"""
+    sents = re.split(r'[。！？；\n]+', text)
+    return [s.strip() for s in sents if s.strip()]
+
+# ---------- 辅助：语义相似度（简化版） ----------
+def semantic_similarity(s1: str, s2: str) -> float:
+    """基于词频的简单相似度（0~1），可替代为词向量但这里用字符集合Jaccard"""
+    set1 = set(s1)
+    set2 = set(s2)
+    if not set1 and not set2:
+        return 1.0
+    inter = set1 & set2
+    union = set1 | set2
+    return len(inter) / len(union) if union else 0.0
 
 # ---------- TSRE 核心 ----------
 def tsre_score(text: str) -> float:
@@ -50,43 +68,161 @@ def tsre_diagnose(text: str) -> dict:
         level = "低自指（结构松散）"; status = "🔴 需修正"
     return {"score": round(score, 4), "level": level, "status": status}
 
-# ---------- TLF 核心 ----------
+# ---------- TLF 核心（增强版） ----------
 def tlf_check(text: str) -> dict:
     conflicts = []
-    # 原有规则...（此处省略，与之前一致）
-    if "是" in text and "不是" in text:
-        conflicts.append("存在'是'和'不是'的矛盾")
-    if "有" in text and "没有" in text:
-        conflicts.append("存在'有'和'没有'的矛盾")
+    conflict_details = []  # 用于存储每个冲突的详细信息（句子、关键词等）
+
+    sentences = split_sentences(text)
+    full_text = text
+
+    # ----- 规则1：矛盾检测（句子级） -----
+    for idx, sent in enumerate(sentences):
+        if "是" in sent and "不是" in sent:
+            conflicts.append("存在'是'和'不是'的矛盾")
+            conflict_details.append({"type": "矛盾", "sentence": sent, "keywords": ["是", "不是"]})
+        if "有" in sent and "没有" in sent:
+            conflicts.append("存在'有'和'没有'的矛盾")
+            conflict_details.append({"type": "矛盾", "sentence": sent, "keywords": ["有", "没有"]})
+
+    # ----- 规则2：循环检测 -----
     if "包含" in text:
         parts = text.split("包含")
         if len(parts) == 2:
             a = parts[0].strip()[-5:]; b = parts[1].strip()[:5]
             if a and b and a == b:
                 conflicts.append(f"循环依赖：'{a}' 包含自身")
+                conflict_details.append({"type": "循环", "sentence": text, "keywords": ["包含"]})
+
+    # ----- 规则3：定义不一致（跨句） -----
     entities = re.findall(r'[A-Za-z\u4e00-\u9fa5]{2,}', text)
     for ent in set(entities):
         defs = re.findall(rf'{ent}是(\w+)', text) + re.findall(rf'{ent}为(\w+)', text)
         if len(set(defs)) > 1:
             conflicts.append(f"实体'{ent}'定义不一致：{list(set(defs))}")
-    # 新增因果/时序倒置检测（简化版）
-    if re.search(r'因为.*所以', text) and re.search(r'所以.*因为', text):
-        conflicts.append("因果表述冲突（'因为...所以...'与'所以...因为...'并存）")
-    if re.search(r'先.*然后', text) and re.search(r'然后.*先', text):
-        conflicts.append("时序表述冲突（'先...然后...'与'然后...先...'并存）")
-    # 矛盾修辞检测
-    if re.search(r'无声的(雷鸣|呐喊|爆炸)', text):
-        conflicts.append("矛盾修辞：'无声的雷鸣'等")
-    if re.search(r'黑暗的(光芒|阳光)', text):
-        conflicts.append("矛盾修辞：'黑暗的光芒'等")
-    return {"conflicts": conflicts, "conflict_count": len(conflicts), "is_valid": len(conflicts)==0}
+            # 定位出现该实体的句子
+            for sent in sentences:
+                if ent in sent:
+                    conflict_details.append({"type": "定义不一致", "sentence": sent, "keywords": [ent]})
+                    break
+
+    # ----- 规则4：因果/时序冲突（跨句检测） -----
+    cause_patterns = [
+        (r'因为.*所以', '因果'), (r'所以.*因为', '因果'),
+        (r'先.*然后', '时序'), (r'然后.*先', '时序'),
+    ]
+    for pattern, label in cause_patterns:
+        if re.search(pattern, text):
+            conflicts.append(f"{label}表述冲突（'{pattern}' 并存）")
+            # 定位涉及该模式的句子
+            for sent in sentences:
+                if re.search(pattern, sent):
+                    conflict_details.append({"type": label, "sentence": sent, "keywords": [pattern]})
+                    break
+
+    # ----- 规则5：矛盾修辞 -----
+    oxymoron_patterns = [
+        (r'无声的(雷鸣|呐喊|爆炸)', '无声的雷鸣等'),
+        (r'黑暗的(光芒|阳光)', '黑暗的光芒等'),
+    ]
+    for pat, msg in oxymoron_patterns:
+        if re.search(pat, text):
+            conflicts.append(f"矛盾修辞：{msg}")
+            for sent in sentences:
+                if re.search(pat, sent):
+                    conflict_details.append({"type": "矛盾修辞", "sentence": sent, "keywords": [pat]})
+                    break
+
+    # ----- 规则6：语义相似度冲突（检测重复但矛盾的表述） -----
+    # 简化：如果两个句子相似度 > 0.8 且包含不同的事实陈述
+    for i in range(len(sentences)):
+        for j in range(i+1, len(sentences)):
+            sim = semantic_similarity(sentences[i], sentences[j])
+            if sim > 0.7:
+                # 检查是否包含冲突关键词（是/不是，有/没有）
+                if ("是" in sentences[i] and "不是" in sentences[j]) or \
+                   ("不是" in sentences[i] and "是" in sentences[j]):
+                    conflicts.append("语义相似但存在矛盾表述")
+                    conflict_details.append({
+                        "type": "语义冲突",
+                        "sentence": f"{sentences[i]} ↔ {sentences[j]}",
+                        "keywords": ["是", "不是"]
+                    })
+
+    return {
+        "conflicts": conflicts,
+        "conflict_count": len(conflicts),
+        "is_valid": len(conflicts) == 0,
+        "conflict_details": conflict_details,
+        "sentences": sentences
+    }
+
+# ---------- 多维度评分 ----------
+def multi_dimension_score(text: str, tsre_score: float, tlf_result: dict) -> dict:
+    """计算逻辑密度、结构复杂度、语义连贯性"""
+    sentences = tlf_result.get("sentences", split_sentences(text))
+    num_sents = len(sentences)
+    if num_sents == 0:
+        return {"logic_density": 0, "structure_complexity": 0, "semantic_coherence": 0}
+
+    # 逻辑密度：冲突数 / 句子数（越低越好，取反）
+    conflict_count = tlf_result["conflict_count"]
+    logic_density = max(0, 1 - (conflict_count / num_sents))
+
+    # 结构复杂度：平均句子长度 + 连接词密度
+    avg_len = sum(len(s) for s in sentences) / num_sents
+    connectives = ["因为", "所以", "虽然", "但是", "然而", "并且", "而且"]
+    conn_count = sum(text.count(c) for c in connectives)
+    conn_density = min(conn_count / num_sents, 1.0)
+    structure_complexity = 0.3 * min(avg_len/50, 1.0) + 0.7 * conn_density
+
+    # 语义连贯性：相邻句子相似度的平均值（用词频Jaccard）
+    if num_sents > 1:
+        sims = []
+        for i in range(num_sents-1):
+            sim = semantic_similarity(sentences[i], sentences[i+1])
+            sims.append(sim)
+        semantic_coherence = sum(sims) / len(sims)
+    else:
+        semantic_coherence = 1.0
+
+    return {
+        "logic_density": round(logic_density, 4),
+        "structure_complexity": round(structure_complexity, 4),
+        "semantic_coherence": round(semantic_coherence, 4)
+    }
+
+# ---------- 自动修正建议生成 ----------
+def generate_fix_suggestions(conflict_details: list, text: str) -> list:
+    """根据冲突详情生成具体修正示例"""
+    suggestions = []
+    for detail in conflict_details:
+        typ = detail.get("type", "")
+        sent = detail.get("sentence", "")
+        if typ == "矛盾":
+            if "是" in sent and "不是" in sent:
+                suggestions.append(f"将 '{sent}' 中的'不是'改为'也是' 或删除其中一个相反表述。")
+            elif "有" in sent and "没有" in sent:
+                suggestions.append(f"将 '{sent}' 中的'没有'改为'还有' 或统一表述。")
+        elif typ == "循环":
+            suggestions.append(f"检查 '{sent}' 中的循环依赖，确保定义不指向自身。")
+        elif typ == "定义不一致":
+            suggestions.append(f"为实体 '{detail['keywords'][0]}' 统一一个定义，避免多重解释。")
+        elif typ == "因果" or typ == "时序":
+            suggestions.append(f"修正 '{sent}' 中的因果关系/时序方向，确保逻辑顺序正确。")
+        elif typ == "矛盾修辞":
+            suggestions.append(f"替换 '{sent}' 中的矛盾修辞，如将'无声的雷鸣'改为'震耳欲聋的雷鸣'。")
+        elif typ == "语义冲突":
+            suggestions.append(f"合并或统一 '{sent}' 中的相似但矛盾的表述。")
+    return list(set(suggestions))  # 去重
 
 # ---------- 全局状态 ----------
 class GlobalState:
-    def __init__(self, text, tsre_result, tlf_result):
+    def __init__(self, text, tsre_result, tlf_result, multi_scores):
         self.text = text
         self.tsre = tsre_result
         self.tlf = tlf_result
+        self.multi_scores = multi_scores
         self.timestamp = datetime.now().isoformat()
         self.status = self._compute_status()
         self.event = self._trigger_event()
@@ -116,64 +252,61 @@ class GlobalState:
             "tsre_score": self.tsre["score"],
             "tsre_level": self.tsre["level"],
             "tlf_conflicts": self.tlf["conflicts"],
+            "multi_scores": self.multi_scores,
             "status": self.status,
             "event": self.event,
             "timestamp": self.timestamp
         }
 
-# ---------- 高亮生成函数 ----------
-def generate_highlighted_text(text: str, conflicts: list) -> str:
-    """根据冲突列表，在文本中用红色背景高亮关键词"""
-    if not conflicts:
+# ---------- 高亮生成（句子级） ----------
+def generate_highlighted_text(text: str, conflict_details: list) -> str:
+    if not conflict_details:
         return text
-    # 定义冲突类型到关键词的映射
-    keyword_map = {
-        "存在'是'和'不是'的矛盾": ["是", "不是"],
-        "存在'有'和'没有'的矛盾": ["有", "没有"],
-        "循环依赖": ["包含"],
-        "实体.*定义不一致": ["是", "为"],
-        "因果表述冲突": ["因为", "所以"],
-        "时序表述冲突": ["先", "然后"],
-        "矛盾修辞": ["无声", "黑暗"],
-    }
     highlighted = text
-    # 按冲突类型提取关键词并高亮
-    for conflict in conflicts:
-        for pattern, keywords in keyword_map.items():
-            if re.search(pattern, conflict):
-                for kw in keywords:
-                    # 使用正则替换，避免替换已高亮的部分
-                    highlighted = re.sub(rf'(?<!<span[^>]*>){re.escape(kw)}(?!</span>)', 
-                                         f'<span style="background-color: #ffcccc; font-weight: bold;">{kw}</span>', 
-                                         highlighted)
-                break
+    # 按冲突类型标记句子
+    for detail in conflict_details:
+        sent = detail.get("sentence", "")
+        typ = detail.get("type", "")
+        if sent and sent in highlighted:
+            # 用红色背景高亮整句，并添加标签
+            tag = f"<span style='background-color: #ffcccc; border-left: 4px solid red; padding: 2px 6px;' title='{typ}'>{sent}</span>"
+            highlighted = highlighted.replace(sent, tag)
     return highlighted
 
 # ---------- 统一分析入口 ----------
 def analyze(text: str) -> dict:
     if not text.strip():
-        return {"error": "文本为空", "tsre": {"score": 0.0, "level": "无效", "status": "❌"}, 
-                "tlf": {"conflicts": [], "conflict_count": 0, "is_valid": False}, 
-                "global_state": None, "highlighted_text": ""}
+        return {"error": "文本为空", "tsre": {"score": 0.0, "level": "无效", "status": "❌"},
+                "tlf": {"conflicts": [], "conflict_count": 0, "is_valid": False, "conflict_details": [], "sentences": []},
+                "multi_scores": {}, "global_state": None, "highlighted_text": "", "fix_suggestions": []}
+
     tsre_result = tsre_diagnose(text)
     tlf_result = tlf_check(text)
-    gs = GlobalState(text, tsre_result, tlf_result)
-    highlighted = generate_highlighted_text(text, tlf_result["conflicts"])
+    multi_scores = multi_dimension_score(text, tsre_result["score"], tlf_result)
+    fix_suggestions = generate_fix_suggestions(tlf_result.get("conflict_details", []), text)
+    gs = GlobalState(text, tsre_result, tlf_result, multi_scores)
+    highlighted = generate_highlighted_text(text, tlf_result.get("conflict_details", []))
+
     return {
         "tsre": tsre_result,
         "tlf": tlf_result,
+        "multi_scores": multi_scores,
+        "fix_suggestions": fix_suggestions,
         "global_state": gs.to_dict(),
         "highlighted_text": highlighted,
         "summary": {
             "is_valid": tsre_result["score"] >= 0.55 and tlf_result["is_valid"],
-            "suggestions": (["TSRE 自指分数偏低，建议检查逻辑衔接。"] if tsre_result["score"] < 0.55 else []) 
+            "suggestions": (["TSRE 自指分数偏低，建议检查逻辑衔接。"] if tsre_result["score"] < 0.55 else [])
                          + ([f"TLF 冲突：{c}" for c in tlf_result["conflicts"]] if not tlf_result["is_valid"] else []),
             "overall_status": "✅ 通过" if tsre_result["score"] >= 0.55 and tlf_result["is_valid"] else "🔴 需修正"
         }
     }
 
 if __name__ == "__main__":
-    # 简单测试
-    test = "太阳是恒星，太阳不是恒星。"
-    result = analyze(test)
-    print(result["highlighted_text"])
+    # 快速测试
+    test_text = "太阳是恒星，太阳不是恒星。苹果是水果，苹果是动物。"
+    result = analyze(test_text)
+    print("TSRE分数:", result["tsre"]["score"])
+    print("冲突数:", result["tlf"]["conflict_count"])
+    print("多维度评分:", result["multi_scores"])
+    print("修正建议:", result["fix_suggestions"])
